@@ -45,7 +45,7 @@ class ModalityEncoder(nn.Module):
 # ---------------------------------------------------------
 class SignLanguageTranslator(nn.Module):
     # 
-    def __init__(self, vision_dim, sensor_dim=26, mode='sensor_fusion', encoder_type='gru'):
+    def __init__(self, vision_dim, sensor_dim=26, mode='sensor_fusion', encoder_type='gru', num_layers=2):
         """
         vision_dim: 비전 특징 벡터의 길이 (예: 얼굴+포즈+입술 = 약 100~200 차원)
         sensor_dim: 양손 센서 특징 벡터의 길이 (기본값 26 = (10+3) * 2)
@@ -62,12 +62,12 @@ class SignLanguageTranslator(nn.Module):
             # 💡 [핵심] 듀얼 인코더 구조!
             # 나중에 두 개를 합쳤을 때 768이 되도록, 각각의 인코더는 384 차원으로 출력하게 만듭니다.
             half_dim = kobart_dim // 2 
-            self.vision_encoder = ModalityEncoder(vision_dim, half_dim, encoder_type)
-            self.sensor_encoder = ModalityEncoder(sensor_dim, half_dim, encoder_type)
+            self.vision_encoder = ModalityEncoder(vision_dim, half_dim, encoder_type, num_layers=num_layers)
+            self.sensor_encoder = ModalityEncoder(sensor_dim, half_dim, encoder_type, num_layers=num_layers)
             
         elif mode == 'vision_only':
             # 센서가 없을 때는 비전 인코더 하나가 768 차원을 모두 담당합니다.
-            self.vision_encoder = ModalityEncoder(vision_dim, kobart_dim, encoder_type)
+            self.vision_encoder = ModalityEncoder(vision_dim, kobart_dim, encoder_type, num_layers=num_layers)
 
     def forward(self, vision_inputs, sensor_inputs, attention_mask, labels=None):
         
