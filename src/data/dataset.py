@@ -5,6 +5,9 @@
 # JSON 파일을 하나씩 열어 2D 배열로 되어있는 MediaPipe 좌표와 센서 값을 1D 벡터(평탄화)로 쭉 펴주는 역할
 # 순수 비전 모델과 센서 융합 모델을 선택해서 학습할 수 있도록 mode 분기 처리
 
+
+# 좌표 값만 가지고 학습하는 Baseline 모델을 먼저 학습 시킨 다음에 velocity 정보를 넣고 학습시켜보기
+
 import os
 import glob
 import json
@@ -34,7 +37,11 @@ class SignLanguageDataset(Dataset):
         # 1. 정답 한국어 텍스트 추출
         korean_text = data['metadata'].get('koreanText', '')
 
-        vision_frames = []
+        pose_vision_frames = []
+        face_vision_frames = []
+        left_hand_vision_frames = []
+        right_hand_vision_frames = []
+        both_hand_vision_frames = []
         sensor_frames = []
 
         # 2. 프레임 순회
@@ -48,7 +55,10 @@ class SignLanguageDataset(Dataset):
             eye = sum(frame.get('eye_keypoints', []), [])
 
             # 비수지 기호 벡터 결합
-            non_manual_feat = pose + face + lip + eyebrow + eye
+            pose_feat = pose
+            face_feat = face + lip + eyebrow + eye
+            pose_vision_frames.append(pose_feat)
+            face_vision_frames.append(face_feat)
 
             # --- [분기] 수지 기호 (손 모양) 데이터 할당 ---
             if self.mode == 'vision_only':
@@ -60,25 +70,38 @@ class SignLanguageDataset(Dataset):
                 left_h = left_h if left_h else [0.0] * 63
                 right_h = right_h if right_h else [0.0] * 63
 
-                # 비전 텐서에 모두 결합, 센서 텐서는 사용 안함
-                vision_frames.append(non_manual_feat + left_h + right_h)
-                sensor_frames.append([0.0] * 26)
+                # 비전 텐서에 모두 결합, 센서 텐서는 사용
+                left_hand_vision_frames.append(left_h)
+                right_hand_vision_frames.append(right_h)
+                both_hand_vision_frames.append([0.0] * 126)
+                sensor_frames.append([0.0] * 28)
 
             elif self.mode == 'sensor_fusion':
-                # 비전 텐서에는 비수지 기호만 들어감
-                vision_frames.append(non_manual_feat)
+                left_h = sum(frame.get('left_hand_keypoints', []), [])
+                right_h = sum(frame.get('right_hand_keypoints', []), [])
+                
+                # 결측치 방어 (21관절 * 3축 = 63)
+                left_h = left_h if left_h else [0.0] * 63
+                right_h = right_h if right_h else [0.0] * 63
+                both_hand_vision_frames.append(left_h + right_h)
 
                 # 센서 텐서에 장갑 데이터(정규화됨) 할당
-                left_s = frame.get('sensor_left_hand', {"flex_mcp_pip": [0.0]*10, "imu_rpy": [0.0]*3})
-                right_s = frame.get('sensor_right_hand', {"flex_mcp_pip": [0.0]*10, "imu_rpy": [0.0]*3})
+                left_s = frame.get('sensor_left_hand', {"flex_mcp_pip": [0.0]*10, "imu_rpy": [0.0]*4})
+                right_s = frame.get('sensor_right_hand', {"flex_mcp_pip": [0.0]*10, "imu_rpy": [0.0]*4})
 
                 left_feat = left_s['flex_mcp_pip'] + left_s['imu_rpy']
                 right_feat = right_s['flex_mcp_pip'] + right_s['imu_rpy']
 
                 sensor_frames.append(left_feat + right_feat)
+                left_hand_vision_frames.append([0.0] * 63)
+                right_hand_vision_frames.append([0.0] * 63)
 
         # 3. 파이토치 FloatTensor로 변환
-        vision_tensor = torch.FloatTensor(vision_frames)
+        pose_vision_tensor = torch.FloatTensor(pose_vision_frames)
+        face_vision_tensor = torch.FloatTensor(face_vision_frames)
+        left_hand_vision_tensor = torch.FloatTensor(left_hand_vision_frames)
+        right_hand_vision_tensor = torch.FloatTensor(right_hand_vision_frames)
+        both_hand_vision_tensor = torch.FloatTensor(both_hand_vision_frames)
         sensor_tensor = torch.FloatTensor(sensor_frames)
 
-        return vision_tensor, sensor_tensor, korean_text
+        return pose_vision_tensor, face_vision_tensor, left_hand_vision_tensor, right_hand_vision_tensor, both_hand_vision_tensor, sensor_tensor, korean_text
