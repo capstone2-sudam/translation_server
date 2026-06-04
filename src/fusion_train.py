@@ -3,8 +3,10 @@
 import torch
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerFast
+from transformers.modeling_outputs import BaseModelOutput
 from tqdm import tqdm
 import os
+import matplotlib.pyplot as plt
 
 from data.dataset import SignLanguageDataset  # dataset.py 파일의 클래스
 from data.collate import SignLanguageCollateFn # collate.py 파일의 클래스
@@ -18,7 +20,7 @@ def main():
     print(f"🔥 현재 사용 중인 디바이스: {device}")
     
     # [Sanity Check용 설정] 처음에는 에포크를 2 정도로 짧게 주고 테스트하세요!
-    num_epochs = 5
+    num_epochs = 50
     batch_size = 32
     learning_rate = 5e-5
 
@@ -41,9 +43,7 @@ def main():
 
     # random_split을 사용하여 무작위 분할 (시드를 고정하여 매번 똑같이 나뉘게 함)
     temp_train_dataset, test_dataset = torch.utils.data.random_split(
-        full_dataset, 
-        [temp_train_size, test_size],
-        generator=torch.Generator().manual_seed(42) 
+        full_dataset, [temp_train_size, test_size], generator=torch.Generator().manual_seed(42) 
     )
 
     # 2차 분할: 남은 80% 중에서 20%를 Validation용으로 분리 (Train 8 : Val 2)
@@ -51,9 +51,7 @@ def main():
     train_size = temp_train_size - val_size
     
     train_dataset, val_dataset = torch.utils.data.random_split(
-        temp_train_dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
+        temp_train_dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42)
     )   
 
     print(f"📊 총 데이터: {total_size}개 ➔ Train: {train_size}개 | Val: {val_size}개 | Test: {test_size}개")
@@ -63,8 +61,6 @@ def main():
     # 학습용은 데이터를 섞어주고(shuffle=True), 평가용은 섞을 필요가 없습니다.
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=4, pin_memory=True)
-
 
     # ---------------------------------------------------------
     # 3. 모델 및 옵티마이저 초기화
@@ -88,10 +84,14 @@ def main():
     # ---------------------------------------------------------
     # 4. 본격적인 학습 루프 (Training Loop) 및 검증 루프
     # ---------------------------------------------------------
-    best_val_loss = float('inf') # Train Loss가 아닌 Val Loss 기준으로 최고 성능을 기록합니다.
+    best_val_loss = float('inf') # Train Loss가 아닌 Val Loss 기준으로 최고 성능을 기록
     # Early Stopping 설정
     patience = 10
     early_stop_counter = 0
+
+    # 그래프 출력을 위한 기록용 리스트 생성
+    train_loss_history = []
+    val_loss_history = []
 
     for epoch in range(num_epochs):
         model.train() # 학습 모드 켬
@@ -119,19 +119,18 @@ def main():
             total_train_loss += loss.item()
             
             # 진행률 바에 현재 Epoch과 Loss 실시간 출력
-            loop.set_description(f"Epoch [{epoch+1}/{num_epochs}]")
             loop.set_postfix(loss=loss.item())
             
         # 1 에포크 평균 Loss 계산
         avg_train_loss = total_train_loss / len(train_loader)
-        print(f"✅ Epoch {epoch+1} 종료 | 평균 오차(Loss): {avg_train_loss:.4f}")
         
         # 🔵 [Validation Phase] 검증 단계 (학습하지 않고 평가만 수행)
         model.eval()
         total_val_loss = 0.0
 
         with torch.no_grad():
-            for batch in val_loader:
+            loop = tqdm(val_loader, leave=True, desc=f"Epoch [{epoch+1}/{num_epochs}] Validation")
+            for step, batch in enumerate(loop):
                 v_inputs = batch['vision_inputs'].to(device)
                 s_inputs = batch['sensor_inputs'].to(device)
                 mask = batch['attention_mask'].to(device)
@@ -140,47 +139,17 @@ def main():
                 # 모델 평가 시에는 역전파 (backward) 수행하지 않음
                 val_outputs = model(v_inputs, s_inputs, mask, labels=lbls)
                 total_val_loss += val_outputs.loss.item()
-        
+                loop.set_postfix(val_loss=val_outputs.loss.item())
+            
         avg_val_loss = total_val_loss / len(val_loader)
         print(f"✅ Epoch {epoch+1} 종료 | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
 
-        # ---------------------------------------------------------
-        # 💡 5. [Sanity Check] 번역 결과 확인 (val_loader의 첫 번째 데이터로 테스트)
-        # ---------------------------------------------------------
-        with torch.no_grad(): # 기울기 계산 끔 (메모리 절약)
-            # 마지막 배치의 첫 번째 데이터 딱 1개만 샘플링 (차원 유지)
-            sample_v = v_inputs[0:1]
-            sample_s = s_inputs[0:1]
-            sample_mask = mask[0:1]
-            sample_label = lbls[0].clone()
-            
-            # 5-A. 듀얼 인코더 통과 및 퓨전 (Fusion)
-            v_feat = model.vision_encoder(sample_v)
-            s_feat = model.sensor_encoder(sample_s)
-            encoder_outputs = torch.cat([v_feat, s_feat], dim=-1) # (1, Seq_len, 768)
-            
-            # 5-B. KoBART 디코더로 텍스트 생성
-            generated_ids = model.kobart.generate(
-                encoder_outputs=(encoder_outputs,),
-                attention_mask=sample_mask,
-                max_length=50,
-                num_beams=3 # 문장을 더 매끄럽게 다듬는 빔 서치
-            )
-            
-            # 5-C. 토큰을 한국어로 디코딩
-            pred_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-            
-            # 5-D. 정답 라벨 디코딩 (Loss 계산용 -100 패딩을 원래 패딩 토큰으로 복원해야 에러 안 남)
-            sample_label[sample_label == -100] = tokenizer.pad_token_id
-            true_text = tokenizer.decode(sample_label.cpu(), skip_special_tokens=True)
-            
-            print("\n[👀 Validation Sanity Check]")
-            print(f"🎯 정답: {true_text}")
-            print(f"🤖 예측: {pred_text}\n")
-            print("-" * 50)
+        # 매 에포크 결과를 리스트에 차곡차곡 저장
+        train_loss_history.append(avg_train_loss)
+        val_loss_history.append(avg_val_loss)
 
         # ---------------------------------------------------------
-        # 6. 베스트 모델 가중치 저장
+        # 5. 베스트 모델 가중치 저장
         # ---------------------------------------------------------
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -198,6 +167,21 @@ def main():
                 print(f"🛑 {patience} 에포크 연속으로 성능이 개선되지 않아 학습을 조기 종료합니다!")
                 break # 전체 학습 for 루프 강제 종료
 
+    print("📈 학습이 종료되었습니다. Loss 수렴 그래프를 생성합니다...")
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, len(train_loss_history) + 1), train_loss_history, label='Train Loss', color='green', marker='o')
+    plt.plot(range(1, len(val_loss_history) + 1), val_loss_history, label='Validation Loss', color='blue', marker='x')
+    
+    plt.title('Training and Validation Loss Trend', fontsize=14)
+    plt.xlabel('Epochs', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend(fontsize=12)
+    
+    # 프로젝트 폴더 내에 이미지 파일로 저장
+    plot_path = './checkpoints/loss_convergence_plot.png'
+    plt.savefig(plot_path, bbox_inches='tight')
+    print(f"📊 그래프 저장 완료! 확인해 보세요 ➔ {plot_path}")
 
 if __name__ == '__main__':
     main()
