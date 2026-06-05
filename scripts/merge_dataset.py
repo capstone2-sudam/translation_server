@@ -1,3 +1,5 @@
+# scripts/merge_dataset.py
+
 import os
 import json
 import numpy as np
@@ -7,17 +9,23 @@ from tqdm import tqdm
 # 센서 데이터 정규화 함수
 def normalize_sensor(hand_data, global_max_flex):
     if not hand_data:
-        return {"flex_mcp_pip": [0.0]*10, "imu_rpy": [0.0]*3}
+        return {"flex_mcp_pip": [0.0]*10, "imu_quat": [0.0, 0.0, 0.0, 1.0]}
     
-    # Flex: 0.0 ~ 1.0 범위로 스케일링 (최대값으로 나누고 1.0 초과는 자름)
     raw_flex = np.array(hand_data.get('flex_mcp_pip', [0.0]*10))
-    scaled_flex = np.clip(raw_flex / global_max_flex, 0.0, 1.0).tolist()
+    scaled_flex = np.clip(raw_flex / global_max_flex, 0.0, 1.0)
     
-    # IMU RPY: -180~180도를 -1.0 ~ 1.0 범위로 스케일링
-    raw_imu = np.array(hand_data.get('imu_rpy', [0.0]*3))
-    scaled_imu = np.clip(raw_imu / 180.0, -1.0, 1.0).tolist()
+    raw_imu = np.array(hand_data.get("imu_quat", [0.0, 0.0, 0.0, 1.0]))
+
+    if np.any(np.isnan(raw_imu)) or np.any(np.isinf(raw_imu)):
+        raw_imu = np.array([0.0, 0.0, 0.0, 1.0])
+
+    # sign fix (valid)
+    if raw_imu[3] < 0:
+        raw_imu = -raw_imu
+
+    scaled_imu = raw_imu
     
-    return {"flex_mcp_pip": scaled_flex, "imu_rpy": scaled_imu}
+    return {"flex_mcp_pip": scaled_flex.tolist(), "imu_quat": scaled_imu.tolist()}
 
 
 def process_and_merge_datasets(vision_dir, sensor_dir, global_max_flex, output_dir):
@@ -79,7 +87,29 @@ def process_and_merge_datasets(vision_dir, sensor_dir, global_max_flex, output_d
             merged_frame = v_frame.copy() 
             merged_frame['sensor_left_hand'] = normalize_sensor(s_frame.get('left_hand'), global_max_flex)
             merged_frame['sensor_right_hand'] = normalize_sensor(s_frame.get('right_hand'), global_max_flex)
-            
+                
+            assert len(merged_frame['sensor_left_hand']["flex_mcp_pip"]) == 10, \
+            f"{base_id} left flex={len(merged_frame['sensor_left_hand']['flex_mcp_pip'])}"
+
+            assert len(merged_frame['sensor_left_hand']["imu_quat"]) == 4, \
+                f"{base_id} left imu={len(merged_frame['sensor_left_hand']['imu_quat'])}"
+
+            assert len(merged_frame['sensor_right_hand']["flex_mcp_pip"]) == 10, \
+                f"{base_id} right flex={len(merged_frame['sensor_right_hand']['flex_mcp_pip'])}"
+
+            assert len(merged_frame['sensor_right_hand']["imu_quat"]) == 4, \
+                f"{base_id} right imu={len(merged_frame['sensor_right_hand']['imu_quat'])}"
+
+            total_sensor_dim = (
+                len(merged_frame['sensor_left_hand']["flex_mcp_pip"]) +
+                len(merged_frame['sensor_left_hand']["imu_quat"]) +
+                len(merged_frame['sensor_right_hand']["flex_mcp_pip"]) +
+                len(merged_frame['sensor_right_hand']["imu_quat"])
+            )
+
+            assert total_sensor_dim == 28, \
+                f"{base_id} total sensor dim={total_sensor_dim}"
+
             merged_frames.append(merged_frame)
             
         # 완성된 통합 데이터 저장
