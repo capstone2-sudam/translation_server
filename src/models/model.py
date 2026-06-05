@@ -17,7 +17,6 @@ class PositionalEncoding(nn.Module):
         )
 
         pe[:, 0::2] = torch.sin(position * div_term)
-
         pe[:, 1::2] = torch.cos(position * div_term)
 
         pe = pe.unsqueeze(0)
@@ -27,7 +26,7 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, :x.size(1)]
     
 class ModalityEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, encoder_type='gru', num_layers=2, dropout = 0.3, max_len=512):
+    def __init__(self, input_dim, hidden_dim, encoder_type='gru', num_layers=2, dropout = 0.2, max_len=512):
         super().__init__()
         self.encoder_type = encoder_type
         
@@ -86,24 +85,24 @@ class ModalityEncoder(nn.Module):
 
 
 class StreamFusion(nn.Module):
-    def __init__(self, input_dim, output_dim, dropout=0.3):
+    def __init__(self, input_dim, output_dim, dropout=0.1):
         super().__init__()
         self.proj = nn.Linear(input_dim, output_dim)
-
+        self.norm = nn.LayerNorm(output_dim)
         self.block = nn.Sequential(
-            nn.LayerNorm(output_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(output_dim, output_dim)
+            nn.Linear(output_dim, output_dim),
+            nn.GELU(),          
+            nn.Linear(output_dim, output_dim),
+            nn.Dropout(dropout)
         )
 
     def forward(self, x):
         x = self.proj(x)
-        return x + self.block(x)
+        # x = self.norm(x)
+        return x + self.block(self.norm(x))
 
 class SignLanguageTranslator(nn.Module):
-    # 
-    def __init__(self, pose_dim, face_dim, left_dim, right_dim, both_dim, sensor_dim=28, mode='sensor_fusion', encoder_type='gru'):
+    def __init__(self, pose_dim, face_dim, left_dim, right_dim, both_dim, sensor_dim=28, mode='sensor_fusion', encoder_type='gru', dropout=0.2):
         super().__init__()
         self.mode = mode
         
@@ -113,19 +112,19 @@ class SignLanguageTranslator(nn.Module):
         kobart_dim = self.kobart.config.d_model 
 
         if mode == 'sensor_fusion':
-            stream_dim = kobart_dim // 4 # 차원 조정 고려해보기
-            self.pose_encoder = ModalityEncoder(pose_dim, stream_dim, encoder_type)
-            self.face_encoder = ModalityEncoder(face_dim, stream_dim, encoder_type)            
-            self.hand_encoder = ModalityEncoder(both_dim, stream_dim, encoder_type)
-            self.sensor_encoder = ModalityEncoder(sensor_dim, stream_dim, encoder_type)
+            stream_dim = 256
+            self.pose_encoder = ModalityEncoder(pose_dim, stream_dim, encoder_type, dropout=dropout)
+            self.face_encoder = ModalityEncoder(face_dim, stream_dim, encoder_type, dropout=dropout)            
+            self.hand_encoder = ModalityEncoder(both_dim, stream_dim, encoder_type, dropout=dropout)
+            self.sensor_encoder = ModalityEncoder(sensor_dim, stream_dim, encoder_type, dropout=dropout)
             fusion_input_dim = stream_dim * 4
             
         elif mode == 'vision_only':
-            stream_dim = kobart_dim // 4
-            self.pose_encoder = ModalityEncoder(pose_dim, stream_dim, encoder_type)
-            self.face_encoder = ModalityEncoder(face_dim, stream_dim, encoder_type)            
-            self.left_encoder = ModalityEncoder(left_dim, stream_dim, encoder_type)
-            self.right_encoder = ModalityEncoder(right_dim, stream_dim, encoder_type)
+            stream_dim = 256
+            self.pose_encoder = ModalityEncoder(pose_dim, stream_dim, encoder_type, dropout=dropout)
+            self.face_encoder = ModalityEncoder(face_dim, stream_dim, encoder_type, dropout=dropout)            
+            self.left_encoder = ModalityEncoder(left_dim, stream_dim, encoder_type, dropout=dropout)
+            self.right_encoder = ModalityEncoder(right_dim, stream_dim, encoder_type, dropout=dropout)
             fusion_input_dim = stream_dim * 4
 
         self.fusion_layer = StreamFusion(
@@ -140,12 +139,7 @@ class SignLanguageTranslator(nn.Module):
             face_feat = self.face_encoder(face_inputs, attention_mask) 
             hand_feat = self.hand_encoder(both_inputs, attention_mask) 
             sensor_feat = self.sensor_encoder(sensor_inputs, attention_mask) 
-            
-            print("pose_feat :", pose_feat.shape)
-            print("face_feat :", face_feat.shape)
-            print("hand_feat :", hand_feat.shape)
-            print("sensor_feat :", sensor_feat.shape)
-
+        
             # 두 특징을 마지막 차원(dim=-1) 기준으로 이어 붙입니다.
             fused = torch.cat([pose_feat, face_feat, hand_feat, sensor_feat], dim=-1)
             
@@ -155,25 +149,16 @@ class SignLanguageTranslator(nn.Module):
             left_feat = self.left_encoder(left_inputs, attention_mask) 
             right_feat = self.right_encoder(right_inputs, attention_mask)
 
-            print("pose_feat :", pose_feat.shape)
-            print("face_feat :", face_feat.shape)
-            print("left_feat :", left_feat.shape)
-            print("right_feat :", right_feat.shape)
-            
             # 두 특징을 마지막 차원(dim=-1) 기준으로 이어 붙입니다.
             fused = torch.cat([pose_feat, face_feat, left_feat, right_feat], dim=-1)
-        
-        encoder_outputs = self.fusion_layer(fused)
-        encoder_outputs = (encoder_outputs * attention_mask.unsqueeze(-1).float())
-        
-        print("Fused Shape :", fused.shape)
-        print("Encoder Shape :", encoder_outputs.shape)
 
+        encoder_outputs = self.fusion_layer(fused)
+        # encoder_outputs = (encoder_outputs * attention_mask.unsqueeze(-1).float())
+        
         return encoder_outputs
 
     def forward(self, pose_inputs, face_inputs, left_inputs, right_inputs, both_inputs, sensor_inputs, attention_mask, labels=None):
         encoder_hidden_states = self.encode_inputs(pose_inputs, face_inputs, left_inputs, right_inputs, both_inputs, sensor_inputs, attention_mask)
-        print(encoder_hidden_states.shape)
         encoder_outputs = BaseModelOutput(last_hidden_state=encoder_hidden_states)
 
         outputs = self.kobart(
