@@ -50,9 +50,7 @@ def main():
     train_size = temp_train_size - val_size
     
     train_dataset, val_dataset = torch.utils.data.random_split(
-        temp_train_dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
+        temp_train_dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42)
     )   
 
     print(f"📊 총 데이터: {total_size}개 ➔ Train: {train_size}개 | Val: {val_size}개 | Test: {test_size}개")
@@ -95,7 +93,7 @@ def main():
     # ---------------------------------------------------------
     # 4. 본격적인 학습 루프 (Training Loop) 및 검증 루프
     # ---------------------------------------------------------
-    best_val_loss = float('inf') # Train Loss가 아닌 Val Loss 기준으로 최고 성능을 기록합니다.
+    best_val_loss = float('inf') # Train Loss가 아닌 Val Loss 기준으로 최고 성능을 기록
     # Early Stopping 설정
     patience = 10
     early_stop_counter = 0
@@ -133,12 +131,10 @@ def main():
             total_train_loss += loss.item()
             
             # 진행률 바에 현재 Epoch과 Loss 실시간 출력
-            loop.set_description(f"Epoch [{epoch+1}/{num_epochs}]")
             loop.set_postfix(loss=loss.item())
             
         # 1 에포크 평균 Loss 계산
         avg_train_loss = total_train_loss / len(train_loader)
-        print(f"✅ Epoch {epoch+1} 종료 | 평균 오차(Loss): {avg_train_loss:.4f}")
         
         # 🔵 [Validation Phase] 검증 단계 (학습하지 않고 평가만 수행)
         model.eval()
@@ -158,7 +154,8 @@ def main():
                 # 모델 평가 시에는 역전파 (backward) 수행하지 않음
                 val_outputs = model(p_inputs, f_inputs, l_inputs, r_inputs, b_inputs, s_inputs, mask, labels=lbls)
                 total_val_loss += val_outputs.loss.item()
-        
+                loop.set_postfix(val_loss=val_outputs.loss.item())
+            
         avg_val_loss = total_val_loss / len(val_loader)
         print(f"✅ Epoch {epoch+1} 종료 | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
 
